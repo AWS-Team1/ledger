@@ -38,7 +38,7 @@
         <spring-cloud.version>2025.1.2</spring-cloud.version>
         <!-- Trivy: fixable HIGH/CRITICAL 제거용 보안 버전 오버라이드 -->
         <netty.version>4.1.137.Final</netty.version>
-        <tomcat.version>10.1.58</tomcat.version>
+        <tomcat.version>10.1.59</tomcat.version>
         <postgresql.version>42.7.12</postgresql.version>
     </properties>
 
