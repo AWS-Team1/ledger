@@ -1,0 +1,335 @@
+name: Build and Push Ledger to ECR
+
+# 대상: balancereader, ledgerwriter, transactionhistory  (ledger 레포)
+# ECR: 769413326616.dkr.ecr.ap-northeast-2.amazonaws.com/boa-<service>   ← boa- 접두사
+# write-back: AWS-TEAM1-DEV/gitops 03_manifests/eks/ledger/<service>.yaml image: 줄
+# 흐름: detect → check-ecr → build(+Trivy) → push → update-gitops
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "src/ledger/balancereader/**"
+      - "src/ledger/ledgerwriter/**"
+      - "src/ledger/transactionhistory/**"
+      - ".github/workflows/build-and-push.yml"
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: "대상 3개 서비스 전체 빌드 (false 면 변경 감지)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  ECR_REGISTRY: 769413326616.dkr.ecr.ap-northeast-2.amazonaws.com
+  GITOPS_REPOSITORY: AWS-TEAM1-DEV/gitops          # ⬅ 변경: 새 org
+  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'dev' }}
+  GITOPS_GROUP_DIR: 03_manifests/eks/ledger        # ⬅ 변경: 새 gitops 경로
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      services: ${{ steps.set.outputs.services }}
+      deploy: ${{ steps.set.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed services
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000') && github.event.before || '' }}
+          filters: |
+            balancereader: 'src/ledger/balancereader/**'
+            ledgerwriter: 'src/ledger/ledgerwriter/**'
+            transactionhistory: 'src/ledger/transactionhistory/**'
+            workflow: '.github/workflows/build-and-push.yml'
+
+      - name: Resolve service list
+        id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_all }}" = "true" ]; then
+            echo 'services=["balancereader","ledgerwriter","transactionhistory"]' >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.filter.outputs.workflow }}" = "true" ]; then
+            echo 'services=["balancereader","ledgerwriter","transactionhistory"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'services=${{ steps.filter.outputs.changes }}' >> "$GITHUB_OUTPUT"
+          fi
+
+          deploy=false
+          if [ "${{ github.ref }}" = "refs/heads/dev" ]; then deploy=true; fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
+  check-ecr:
+    needs: detect
+    if: ${{ needs.detect.outputs.deploy == 'true' && needs.detect.outputs.services != '[]' && needs.detect.outputs.services != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      existing_services: ${{ steps.lookup.outputs.existing_services }}
+      existing_digests: ${{ steps.lookup.outputs.existing_digests }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Find existing immutable ECR tags
+        id: lookup
+        shell: bash
+        env:
+          SERVICES_JSON: ${{ needs.detect.outputs.services }}
+        run: |
+          set -Eeuo pipefail
+          existing_services='[]'
+          existing_digests='{}'
+          while IFS= read -r service; do
+            repo="boa-${service}"                          # ⬅ 변경: boa- 접두사
+            tag="sha-${{ github.sha }}"
+            error_file="${RUNNER_TEMP}/ecr-${repo}.err"
+            if digest=$(aws ecr describe-images --repository-name "$repo" \
+              --image-ids "imageTag=${tag}" --query 'imageDetails[0].imageDigest' \
+              --output text 2>"$error_file"); then
+              [[ "$digest" == sha256:* ]] || { echo "::error::invalid digest ${repo}:${tag}"; exit 1; }
+              echo "Reusing ${ECR_REGISTRY}/${repo}:${tag}@${digest}"
+              existing_services=$(jq -c --arg s "$service" '. + [$s]' <<<"$existing_services")
+              existing_digests=$(jq -c --arg s "$service" --arg d "$digest" '. + {($s): $d}' <<<"$existing_digests")
+            elif grep -q 'ImageNotFoundException' "$error_file"; then
+              echo "New immutable tag: ${ECR_REGISTRY}/${repo}:${tag}"
+            else
+              cat "$error_file" >&2; exit 1
+            fi
+          done < <(jq -r '.[]' <<<"$SERVICES_JSON")
+          echo "existing_services=$existing_services" >> "$GITHUB_OUTPUT"
+          echo "existing_digests=$existing_digests" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [detect, check-ecr]
+    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.services != '[]' && needs.detect.outputs.services != '' && (needs.detect.outputs.deploy != 'true' || needs.check-ecr.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+
+      - name: Reuse existing immutable ECR image
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) }}
+        run: echo "Build/scan/push skipped for ${{ matrix.service }} (already in ECR)."
+
+      - name: Resolve build context path and image tags
+        id: meta
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+        run: |
+          case "${{ matrix.service }}" in
+            balancereader)      path=src/ledger/balancereader ;;
+            ledgerwriter)       path=src/ledger/ledgerwriter ;;
+            transactionhistory) path=src/ledger/transactionhistory ;;
+            *) echo "unknown service: ${{ matrix.service }}"; exit 1 ;;
+          esac
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ needs.detect.outputs.deploy }}" = "true" ]; then
+            img="${ECR_REGISTRY}/boa-${{ matrix.service }}"   # ⬅ 변경: boa- 접두사
+            tags="${img}:sha-${{ github.sha }}"
+          else
+            tags="boa-${{ matrix.service }}:manual-${{ github.sha }}"
+          fi
+          { echo "tags<<EOF"; echo "$tags"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image to tarball
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ steps.meta.outputs.path }}
+          file: ${{ steps.meta.outputs.path }}/Dockerfile
+          push: false
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan (fail on HIGH/CRITICAL)
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: ${{ runner.temp }}/image.tar
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Upload scanned image
+        if: ${{ needs.detect.outputs.deploy == 'true' && contains(fromJSON(needs.check-ecr.outputs.existing_services || '[]'), matrix.service) == false }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ matrix.service }}
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  push:
+    needs: [detect, check-ecr, build]
+    if: ${{ needs.detect.outputs.deploy == 'true' && needs.detect.outputs.services != '[]' && needs.detect.outputs.services != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect.outputs.services) }}
+    steps:
+      - name: Reuse existing immutable ECR image
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) }}
+        run: echo "No push required for ${{ matrix.service }} (already in ECR)."
+
+      - name: Download scanned image
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) == false }}
+        uses: actions/download-artifact@v7
+        with:
+          name: image-${{ matrix.service }}
+          path: ${{ runner.temp }}
+
+      - name: Load scanned image into Docker
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) == false }}
+        run: docker load -i "${{ runner.temp }}/image.tar"
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) == false }}
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Login to Amazon ECR (private)
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) == false }}
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push scanned image to Amazon ECR
+        if: ${{ contains(fromJSON(needs.check-ecr.outputs.existing_services), matrix.service) == false }}
+        run: |
+          set -Eeuo pipefail
+          repo="boa-${{ matrix.service }}"                  # ⬅ 변경: boa- 접두사
+          tag="sha-${{ github.sha }}"
+          target="${ECR_REGISTRY}/${repo}:${tag}"
+          error_file="${RUNNER_TEMP}/ecr-race-${repo}.err"
+          echo "::group::docker push ${target}"
+          if docker push "$target"; then
+            echo "Published: ${target}"
+          else
+            push_status=$?
+            if digest=$(aws ecr describe-images --repository-name "$repo" \
+              --image-ids "imageTag=${tag}" --query 'imageDetails[0].imageDigest' \
+              --output text 2>"$error_file"); then
+              [[ "$digest" == sha256:* ]] || { echo "::error::invalid digest"; exit 1; }
+              echo "::warning::tag appeared during run; reusing ${target}@${digest}"
+            else
+              cat "$error_file" >&2; exit "$push_status"
+            fi
+          fi
+          echo "::endgroup::"
+
+  update-gitops:
+    needs: [detect, check-ecr, push]
+    if: ${{ needs.detect.outputs.deploy == 'true' && needs.detect.outputs.services != '[]' && needs.detect.outputs.services != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GITOPS_REPOSITORY }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+          fetch-depth: 0
+
+      - name: Update GitOps image tags
+        env:
+          SERVICES_JSON: ${{ needs.detect.outputs.services }}
+          IMAGE_TAG: sha-${{ github.sha }}
+          GROUP_DIR: ${{ env.GITOPS_GROUP_DIR }}
+        working-directory: gitops
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          registry = "769413326616.dkr.ecr.ap-northeast-2.amazonaws.com"
+          allowed = {"balancereader", "ledgerwriter", "transactionhistory"}
+          services = json.loads(os.environ["SERVICES_JSON"])
+          tag = os.environ["IMAGE_TAG"]
+          group_dir = Path(os.environ["GROUP_DIR"])
+
+          if not re.fullmatch(r"sha-[0-9a-f]{40}", tag):
+              raise SystemExit(f"invalid immutable image tag: {tag}")
+          if not services or any(s not in allowed for s in services):
+              raise SystemExit(f"invalid service list: {services}")
+
+          for service in services:
+              path = group_dir / f"{service}.yaml"
+              if not path.is_file():
+                  raise SystemExit(f"GitOps manifest not found: {path}")
+              image = f"{registry}/boa-{service}"           # ⬅ boa- 접두사
+              content = path.read_text(encoding="utf-8")
+              pattern = re.compile(
+                  rf"^([ \t]*image:[ \t]*{re.escape(image)}:)\S+([ \t]*)$",
+                  re.MULTILINE,
+              )
+              content, count = pattern.subn(
+                  lambda m: f"{m.group(1)}{tag}{m.group(2)}", content
+              )
+              if count != 1:
+                  raise SystemExit(f"expected exactly one image line for {service}, found {count}")
+              path.write_text(content, encoding="utf-8")
+          PY
+          git diff --check
+
+      - name: Commit and push GitOps update
+        working-directory: gitops
+        run: |
+          if git diff --quiet; then
+            echo "GitOps already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name "aws-team1-cicd"
+          git config user.email "aws-team1-cicd@users.noreply.github.com"
+          git add -A
+          git commit -m "deploy(ledger): sha-${{ github.sha }}"
+
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${GITOPS_BRANCH}"; then exit 0; fi
+            if [ "$attempt" -eq 5 ]; then echo "::error::push failed after 5 attempts"; exit 1; fi
+            git fetch origin "+refs/heads/${GITOPS_BRANCH}:refs/remotes/origin/${GITOPS_BRANCH}"
+            if ! git rebase "origin/${GITOPS_BRANCH}"; then
+              git rebase --abort || true
+              echo "::error::GitOps write-back conflict"; exit 1
+            fi
+          done
