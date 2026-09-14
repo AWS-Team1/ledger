@@ -36,6 +36,10 @@
         <bootstrap.version>4.6.2</bootstrap.version>
         <checkstyle.config.location>./checkstyle.xml</checkstyle.config.location>
         <spring-cloud.version>2025.1.2</spring-cloud.version>
+        <!-- Trivy: fixable HIGH/CRITICAL 제거용 보안 버전 오버라이드 -->
+        <netty.version>4.1.137.Final</netty.version>
+        <tomcat.version>10.1.58</tomcat.version>
+        <postgresql.version>42.7.12</postgresql.version>
     </properties>
 
      <dependencyManagement>
