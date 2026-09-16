@@ -1,4 +1,4 @@
-FROM maven:3.9-eclipse-temurin-17@sha256:0af1de9f9b587b9f57a97379c292dc1c1d3ff61a476fdfa1b5eb42ff5b3cbc0f AS builder
+FROM maven:3-eclipse-temurin-26@sha256:4e980a3c7def35292c12ce1a1dc7872f02165f11717204c7b1c2dc477e40c1b8 AS builder
 WORKDIR /app
 COPY pom.xml .
 COPY src ./src
