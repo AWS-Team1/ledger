@@ -4,7 +4,7 @@ COPY pom.xml .
 COPY src ./src
 RUN mvn -B -DskipTests package
 
-FROM eclipse-temurin:17-jre@sha256:23d7f52652b6b65b57eab85df9631741807929a68ff7e37c27104de6ac6690d5
+FROM eclipse-temurin:25-jre@sha256:611e326900ba9edcedfb246ede24efc66a911fa496ac623db9f33cae88a2d83b
 WORKDIR /app
 COPY --from=builder /app/target/*.jar /app/app.jar
 # Trivy: base 이미지의 미사용 Go 바이너리 pebble 제거(Go stdlib/x-net CVE) + OS 보안 업데이트
