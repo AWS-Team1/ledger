@@ -1,17 +1,33 @@
 version: 2
+
 updates:
   - package-ecosystem: docker
-    directory: /src/ledger/balancereader
+    directories:
+      - /src/ledger/balancereader
+      - /src/ledger/ledgerwriter
+      - /src/ledger/transactionhistory
+
     target-branch: dev
+
     schedule:
       interval: weekly
-  - package-ecosystem: docker
-    directory: /src/ledger/ledgerwriter
-    target-branch: dev
-    schedule:
-      interval: weekly
-  - package-ecosystem: docker
-    directory: /src/ledger/transactionhistory
-    target-branch: dev
-    schedule:
-      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+
+    open-pull-requests-limit: 1
+
+    groups:
+      java17-docker-images:
+        patterns:
+          - "*"
+
+    ignore:
+      # Java 17 계열은 유지하되 Java 18 이상으로의 자동 변경 차단
+      - dependency-name: eclipse-temurin
+        update-types:
+          - version-update:semver-major
+
+      # Maven+JDK 복합 태그는 Dependabot이 JDK 26 등으로
+      # 잘못 해석할 수 있어 수동 검토 대상으로 분리
+      - dependency-name: maven
