@@ -28,7 +28,7 @@ permissions: {}
 
 env:
   ECR_REGISTRY: 769413326616.dkr.ecr.ap-northeast-2.amazonaws.com
-  GITOPS_REPOSITORY: AWS-TEAM1-DEV/gitops          # ⬅ 변경: 새 org
+  GITOPS_REPOSITORY: AWS-TEAM1/gitops          # ⬅ 변경: 새 org
   GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'dev' }}
   GITOPS_GROUP_DIR: 03_manifests/eks/ledger        # ⬅ 변경: 새 gitops 경로
 
