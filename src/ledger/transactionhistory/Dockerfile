@@ -16,7 +16,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get upgrade -y; \
     apt-get clean; \
-    
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
 USER 1000
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
