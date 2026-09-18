@@ -17,8 +17,8 @@ permissions: {}
 env:
   AWS_REGION: ap-northeast-2
   ECR_REGISTRY: 769413326616.dkr.ecr.ap-northeast-2.amazonaws.com
-  GITOPS_REPOSITORY: AWS-TEAM1-DEV/gitops
-  GITOPS_BRANCH: dev
+  GITOPS_REPOSITORY: AWS-Team1/gitops
+  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'dev' }}
   GITOPS_GROUP_DIR: 03_manifests/eks/ledger
 
 jobs:
@@ -245,6 +245,8 @@ jobs:
           provenance: false
           tags: ${{ steps.meta.outputs.image }}
           outputs: type=docker,dest=${{ runner.temp }}/image.tar
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=ledger-${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=ledger-${{ matrix.service }}
 
