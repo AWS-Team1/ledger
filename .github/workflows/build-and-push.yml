@@ -170,7 +170,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           outputs: type=docker,dest=${{ runner.temp }}/image.tar
           build-args: |
-            SECURITY_REFRESH=${{ github.run_id }}
+            SECURITY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
