@@ -58,7 +58,9 @@ public class JWTVerifierGenerator {
                     (RSAPublicKey) kf.generatePublic(keySpecX509);
             // Initialize JWT verifier.
             Algorithm algorithm = Algorithm.RSA256(publicKey, null);
-            return JWT.require(algorithm).build();
+            return JWT.require(algorithm)
+                    .withClaim("token_type", "access")
+                    .build();
         } catch (IOException
                 | NoSuchAlgorithmException
                 | InvalidKeySpecException e) {
