@@ -56,6 +56,7 @@ public final class LedgerWriterController {
 
     private TransactionRepository transactionRepository;
     private TransactionValidator transactionValidator;
+    private LedgerCacheInvalidator cacheInvalidator;
     private JWTVerifier verifier;
 
     private String localRoutingNum;
@@ -82,6 +83,7 @@ public final class LedgerWriterController {
             StackdriverMeterRegistry meterRegistry,
             TransactionRepository transactionRepository,
             TransactionValidator transactionValidator,
+            LedgerCacheInvalidator cacheInvalidator,
             @Value("${LOCAL_ROUTING_NUM}") String localRoutingNum,
             @Value("http://${BALANCES_API_ADDR}/balances")
                     String balancesApiUri,
@@ -89,6 +91,7 @@ public final class LedgerWriterController {
         this.verifier = verifier;
         this.transactionRepository = transactionRepository;
         this.transactionValidator = transactionValidator;
+        this.cacheInvalidator = cacheInvalidator;
         this.localRoutingNum = localRoutingNum;
         this.balancesApiUri = balancesApiUri;
         this.version = version;
@@ -169,6 +172,12 @@ public final class LedgerWriterController {
 
             // No exceptions thrown. Add to ledger
             transactionRepository.save(transaction);
+            if (localRoutingNum.equals(transaction.getFromRoutingNum())) {
+                cacheInvalidator.invalidate(transaction.getFromAccountNum());
+            }
+            if (localRoutingNum.equals(transaction.getToRoutingNum())) {
+                cacheInvalidator.invalidate(transaction.getToAccountNum());
+            }
             this.cache.put(transaction.getRequestUuid(),
                     transaction.getTransactionId());
             LOGGER.info("Submitted transaction successfully");
