@@ -24,9 +24,10 @@ env:
   GAR_REPOSITORY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPOSITORY }}
 
   # GitOps
-  GITOPS_REPOSITORY: AWS-Team1/gitops
+  GITOPS_REPOSITORY: AWS-TEAM1/gitops
   GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'dev' }}
-  GITOPS_GROUP_DIR: 03_manifests/eks/ledger
+  EKS_GITOPS_GROUP_DIR: 03_manifests/eks/ledger
+  GKE_GITOPS_GROUP_DIR: 03_manifests/gke/ledger
 
 jobs:
   # ============================================================
@@ -1194,7 +1195,20 @@ jobs:
           echo "  GAR     = $gar_target"
 
   # ============================================================
-  # 6. Update GitOps
+  # 6. Update GitOps image references
+  #
+  # Update all deployment references with the same immutable SHA:
+  #
+  # EKS GitOps
+  #   -> ECR image
+  #
+  # GKE GitOps
+  #   -> GAR image
+  #
+  # Manual EKS manifests
+  #   -> ECR image
+  #
+  # All changed files are committed together in one GitOps commit.
   # ============================================================
   update-gitops:
     name: Update GitOps image references
@@ -1229,7 +1243,6 @@ jobs:
     steps:
       - name: Check out GitOps repository
         uses: actions/checkout@v6
-
         with:
           repository: ${{ env.GITOPS_REPOSITORY }}
           ref: ${{ env.GITOPS_BRANCH }}
@@ -1237,14 +1250,21 @@ jobs:
           path: gitops
           fetch-depth: 0
 
-      - name: Update only the mapped container images
+      - name: Update GitOps and manual image references
         working-directory: gitops
         shell: bash
 
         env:
           SERVICES_JSON: ${{ needs.detect.outputs.services }}
           IMAGE_TAG: sha-${{ github.sha }}
-          GROUP_DIR: ${{ env.GITOPS_GROUP_DIR }}
+
+          EKS_GROUP_DIR: ${{ env.EKS_GITOPS_GROUP_DIR }}
+          GKE_GROUP_DIR: ${{ env.GKE_GITOPS_GROUP_DIR }}
+          MANUAL_EKS_DIR: manual/eks
+
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+          GAR_REPOSITORY: ${{ env.GAR_REPOSITORY }}
+
           CHANGED_LIST: ${{ runner.temp }}/gitops-changed-files.txt
 
         run: |
@@ -1257,9 +1277,29 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          registry = (
-              "769413326616.dkr.ecr."
-              "ap-northeast-2.amazonaws.com"
+          services = json.loads(
+              os.environ["SERVICES_JSON"]
+          )
+
+          tag = os.environ["IMAGE_TAG"]
+
+          ecr_registry = os.environ["ECR_REGISTRY"]
+          gar_repository = os.environ["GAR_REPOSITORY"]
+
+          eks_group_dir = Path(
+              os.environ["EKS_GROUP_DIR"]
+          )
+
+          gke_group_dir = Path(
+              os.environ["GKE_GROUP_DIR"]
+          )
+
+          manual_eks_dir = Path(
+              os.environ["MANUAL_EKS_DIR"]
+          )
+
+          changed_list = Path(
+              os.environ["CHANGED_LIST"]
           )
 
           allowed = {
@@ -1268,22 +1308,9 @@ jobs:
               "transactionhistory",
           }
 
-          services = json.loads(
-              os.environ["SERVICES_JSON"]
-          )
-
-          tag = os.environ["IMAGE_TAG"]
-
-          group_dir = Path(
-              os.environ["GROUP_DIR"]
-          )
-
-          changed_list = Path(
-              os.environ["CHANGED_LIST"]
-          )
-
           if (
-              services != sorted(set(services))
+              not isinstance(services, list)
+              or services != sorted(set(services))
               or not services
               or any(
                   service not in allowed
@@ -1304,21 +1331,16 @@ jobs:
 
           expected_changed: list[str] = []
 
-          for service in services:
-              path = (
-                  group_dir
-                  / f"{service}.yaml"
-              )
+          def update_image(
+              path: Path,
+              service: str,
+              image: str,
+          ) -> None:
 
               if not path.is_file():
                   raise SystemExit(
-                      "mapped GitOps manifest "
-                      f"not found: {path}"
+                      f"mapped manifest not found: {path}"
                   )
-
-              image = (
-                  f"{registry}/boa-{service}:{tag}"
-              )
 
               content = path.read_text(
                   encoding="utf-8"
@@ -1343,8 +1365,8 @@ jobs:
               if count != 1:
                   raise SystemExit(
                       "expected exactly one mapped "
-                      f"container for {service}, "
-                      f"found {count}"
+                      f"container for {service} "
+                      f"in {path}, found {count}"
                   )
 
               if updated != content:
@@ -1357,10 +1379,55 @@ jobs:
                       path.as_posix()
                   )
 
+                  print(
+                      f"Updated {path} -> {image}"
+                  )
+              else:
+                  print(
+                      f"Already current {path} -> {image}"
+                  )
+
+          for service in services:
+              ecr_image = (
+                  f"{ecr_registry}/"
+                  f"boa-{service}:{tag}"
+              )
+
+              gar_image = (
+                  f"{gar_repository}/"
+                  f"boa-{service}:{tag}"
+              )
+
+              targets = [
+                  (
+                      eks_group_dir / f"{service}.yaml",
+                      ecr_image,
+                  ),
+                  (
+                      gke_group_dir / f"{service}.yaml",
+                      gar_image,
+                  ),
+                  (
+                      manual_eks_dir / f"{service}.yaml",
+                      ecr_image,
+                  ),
+              ]
+
+              for path, image in targets:
+                  update_image(
+                      path=path,
+                      service=service,
+                      image=image,
+                  )
+
           actual_changed = sorted(
               line
               for line in subprocess.check_output(
-                  ["git", "diff", "--name-only"],
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                  ],
                   text=True,
               ).splitlines()
               if line
@@ -1382,6 +1449,16 @@ jobs:
               ),
               encoding="utf-8",
           )
+
+          print(
+              "GitOps image reference update completed."
+          )
+
+          for path in expected_changed:
+              print(
+                  f"Changed: {path}"
+              )
+
           PY
 
           git diff --check
@@ -1397,7 +1474,7 @@ jobs:
           set -Eeuo pipefail
 
           if [ ! -s "$CHANGED_LIST" ]; then
-            echo "GitOps references already point to sha-${{ github.sha }}."
+            echo "All GitOps references already point to sha-${{ github.sha }}."
             exit 0
           fi
 
