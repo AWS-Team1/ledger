@@ -55,6 +55,8 @@ class LedgerWriterControllerTest {
     @Mock
     private TransactionRepository transactionRepository;
     @Mock
+    private LedgerCacheInvalidator cacheInvalidator;
+    @Mock
     private JWTVerifier verifier;
     @Mock
     private Transaction transaction;
@@ -101,6 +103,7 @@ class LedgerWriterControllerTest {
         ledgerWriterController = new LedgerWriterController(verifier,
                 meterRegistry,
                 transactionRepository, transactionValidator,
+                cacheInvalidator,
                 LOCAL_ROUTING_NUM, BALANCES_API_ADDR, VERSION);
 
         when(verifier.verify(TOKEN)).thenReturn(jwt);

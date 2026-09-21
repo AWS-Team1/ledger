@@ -19,11 +19,7 @@ package anthos.samples.bankofanthos.balancereader;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.auth0.jwt.interfaces.DecodedJWT;
-import com.google.common.cache.LoadingCache;
-import com.google.common.util.concurrent.UncheckedExecutionException;
-import io.micrometer.core.instrument.binder.cache.GuavaCacheMetrics;
 import io.micrometer.stackdriver.StackdriverMeterRegistry;
-import java.util.concurrent.ExecutionException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -52,7 +48,7 @@ public final class BalanceReaderController {
     private String version;
 
     private JWTVerifier verifier;
-    private LoadingCache<String, Long> cache;
+    private BalanceCache cache;
     private LedgerReader ledgerReader;
 
     /**
@@ -64,7 +60,7 @@ public final class BalanceReaderController {
     public BalanceReaderController(LedgerReader reader,
         JWTVerifier verifier,
         StackdriverMeterRegistry meterRegistry,
-        LoadingCache<String, Long> cache,
+        BalanceCache cache,
         @Value("${LOCAL_ROUTING_NUM}") final String localRoutingNum,
         @Value("${VERSION}") final String version) {
         // Initialize JWT verifier.
@@ -72,7 +68,6 @@ public final class BalanceReaderController {
         LOGGER.debug("Initialized JWT verifier");
         // Initialize cache
         this.cache = cache;
-        GuavaCacheMetrics.monitor(meterRegistry, this.cache, "Guava");
         LOGGER.debug("Initialized cache");
         this.version = version;
         // Initialize transaction processor.
@@ -83,17 +78,11 @@ public final class BalanceReaderController {
             final String fromRouting = transaction.getFromRoutingNum();
             final String toId = transaction.getToAccountNum();
             final String toRouting = transaction.getToRoutingNum();
-            final Integer amount = transaction.getAmount();
-
-            if (fromRouting.equals(localRoutingNum)
-                && this.cache.asMap().containsKey(fromId)) {
-                Long prevBalance = cache.asMap().get(fromId);
-                this.cache.put(fromId, prevBalance - amount);
+            if (fromRouting.equals(localRoutingNum)) {
+                this.cache.invalidate(fromId);
             }
-            if (toRouting.equals(localRoutingNum)
-                && this.cache.asMap().containsKey(toId)) {
-                Long prevBalance = cache.asMap().get(toId);
-                this.cache.put(toId, prevBalance + amount);
+            if (toRouting.equals(localRoutingNum)) {
+                this.cache.invalidate(toId);
             }
         });
     }
@@ -168,10 +157,6 @@ public final class BalanceReaderController {
             LOGGER.error("Failed to retrieve account balance: not authorized");
             return new ResponseEntity<>("not authorized",
                 HttpStatus.UNAUTHORIZED);
-        } catch (ExecutionException | UncheckedExecutionException e) {
-            LOGGER.error("Cache error");
-            return new ResponseEntity<>("cache error",
-                HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 }

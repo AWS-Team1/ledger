@@ -19,13 +19,9 @@ package anthos.samples.bankofanthos.transactionhistory;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.auth0.jwt.interfaces.DecodedJWT;
-import com.google.common.cache.LoadingCache;
-import com.google.common.util.concurrent.UncheckedExecutionException;
-import io.micrometer.core.instrument.binder.cache.GuavaCacheMetrics;
 import io.micrometer.stackdriver.StackdriverMeterRegistry;
 import java.util.Collection;
 import java.util.Deque;
-import java.util.concurrent.ExecutionException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,13 +50,11 @@ public final class TransactionHistoryController {
 
     @Value("${EXTRA_LATENCY_MILLIS:#{null}}")
     private Integer extraLatencyMillis;
-    @Value("${HISTORY_LIMIT:100}")
-    private Integer historyLimit;
     private String version;
 
     private JWTVerifier verifier;
     private LedgerReader ledgerReader;
-    private LoadingCache<String, Deque<Transaction>> cache;
+    private TransactionCache cache;
 
     /**
      * Constructor.
@@ -72,7 +66,7 @@ public final class TransactionHistoryController {
             StackdriverMeterRegistry meterRegistry,
             JWTVerifier verifier,
             @Value("${PUB_KEY_PATH}") final String publicKeyPath,
-            LoadingCache<String, Deque<Transaction>> cache,
+            TransactionCache cache,
             @Value("${LOCAL_ROUTING_NUM}") final String localRoutingNum,
             @Value("${VERSION}") final String version) {
         this.version = version;
@@ -80,7 +74,6 @@ public final class TransactionHistoryController {
         this.verifier = verifier;
         // Initialize cache
         this.cache = cache;
-        GuavaCacheMetrics.monitor(meterRegistry, this.cache, "Guava");
         // Initialize transaction processor.
         this.ledgerReader = reader;
         LOGGER.debug("Initialized transaction processor");
@@ -90,32 +83,13 @@ public final class TransactionHistoryController {
             final String toId = transaction.getToAccountNum();
             final String toRouting = transaction.getToRoutingNum();
 
-            if (fromRouting.equals(localRoutingNum)
-                    && this.cache.asMap().containsKey(fromId)) {
-                processTransaction(fromId, transaction);
+            if (fromRouting.equals(localRoutingNum)) {
+                this.cache.invalidate(fromId);
             }
-            if (toRouting.equals(localRoutingNum)
-                    && this.cache.asMap().containsKey(toId)) {
-                processTransaction(toId, transaction);
+            if (toRouting.equals(localRoutingNum)) {
+                this.cache.invalidate(toId);
             }
         });
-    }
-
-    /**
-     * Helper function to add a single transaction to the internal cache
-     *
-     * @param accountId   the accountId associated with the transaction
-     * @param transaction the full transaction object
-     */
-    private void processTransaction(String accountId, Transaction transaction) {
-        LOGGER.debug("Modifying transaction cache: " + accountId);
-        Deque<Transaction> tList = this.cache.asMap()
-                                             .get(accountId);
-        tList.addFirst(transaction);
-        // Drop old transactions
-        if (tList.size() > historyLimit) {
-            tList.removeLast();
-        }
     }
 
    /**
@@ -201,10 +175,6 @@ public final class TransactionHistoryController {
                 + "not authorized");
             return new ResponseEntity<>("not authorized",
                                               HttpStatus.UNAUTHORIZED);
-        } catch (ExecutionException | UncheckedExecutionException e) {
-            LOGGER.error("Cache error");
-            return new ResponseEntity<>("cache error",
-                                              HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 }

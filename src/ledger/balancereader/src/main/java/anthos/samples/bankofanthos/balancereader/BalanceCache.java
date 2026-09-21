@@ -1,74 +1,113 @@
-/*
- * Copyright 2020, Google LLC.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
+/* Copyright 2026 Google LLC */
 package anthos.samples.bankofanthos.balancereader;
 
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.cluster.RedisClusterClient;
+import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
+import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
+import jakarta.annotation.PreDestroy;
+import java.time.Duration;
+import java.util.concurrent.ThreadLocalRandom;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.web.client.ResourceAccessException;
+import org.springframework.stereotype.Component;
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-
-/**
- * BalanceCache creates the LoadingCache that handles caching
- * and retrieving account balances from the TransactionRepository.
- */
-@Configuration
+/** Distributed, fail-open cache-aside storage for display balances. */
+@Component
 public class BalanceCache {
+    private static final Logger LOGGER = LogManager.getLogger(BalanceCache.class);
+    private static final String KEY_PREFIX = "boa:cache:v1:balance:";
 
-    private static final Logger LOGGER =
-        LogManager.getLogger(BalanceCache.class);
+    private final TransactionRepository dbRepo;
+    private final String localRoutingNum;
+    private final long ttlSeconds;
+    private final long jitterSeconds;
+    private final RedisClusterClient client;
+    private StatefulRedisClusterConnection<String, String> connection;
 
-    @Autowired
-    private TransactionRepository dbRepo;
+    public BalanceCache(
+            TransactionRepository dbRepo,
+            @Value("${LOCAL_ROUTING_NUM}") String localRoutingNum,
+            @Value("${BALANCE_CACHE_TTL_SECONDS:5}") long ttlSeconds,
+            @Value("${BALANCE_CACHE_JITTER_SECONDS:1}") long jitterSeconds,
+            @Value("${VALKEY_HOST:}") String host,
+            @Value("${VALKEY_PORT:6379}") int port,
+            @Value("${VALKEY_USERNAME:}") String username,
+            @Value("${VALKEY_PASSWORD:}") String password,
+            @Value("${VALKEY_TLS:true}") boolean useTls) {
+        this.dbRepo = dbRepo;
+        this.localRoutingNum = localRoutingNum;
+        this.ttlSeconds = ttlSeconds;
+        this.jitterSeconds = jitterSeconds;
+        this.client = host.isBlank() ? null : RedisClusterClient.create(
+            RedisURI.builder()
+                .withHost(host)
+                .withPort(port)
+                .withAuthentication(username, password.toCharArray())
+                .withSsl(useTls)
+                .withTimeout(Duration.ofSeconds(2))
+                .build());
+    }
 
-    /**
-     * Initializes the LoadingCache for the BalanceReaderController
-     *
-     * @param expireSize max size of the cache
-     * @param localRoutingNum bank routing number for account
-     * @return the LoadingCache storing accountIds and their balances
-     */
-    @Bean (name = "cache")
-    public LoadingCache<String, Long> initializeCache(
-        @Value("${CACHE_SIZE:1000000}") final Integer expireSize,
-        @Value("${LOCAL_ROUTING_NUM}") String localRoutingNum) {
-        CacheLoader loader =  new CacheLoader<String, Long>() {
-            @Override
-            public Long load(String accountId)
-                throws ResourceAccessException,
-                DataAccessResourceFailureException {
-                LOGGER.debug("Cache loaded from db");
-                Long balance = dbRepo.findBalance(accountId, localRoutingNum);
-                if (balance == null) {
-                    balance = 0L;
-                }
-                return balance;
+    /** Get from Valkey, falling back to DB on miss or cache failure. */
+    public Long get(String accountId) {
+        try {
+            String cached = commands().get(key(accountId));
+            if (cached != null) {
+                return Long.valueOf(cached);
             }
-        };
-        return CacheBuilder.newBuilder()
-            .recordStats()
-            .maximumSize(expireSize)
-            .build(loader);
+        } catch (RuntimeException err) {
+            LOGGER.warn("Balance cache read failed; using DB: {}", err.toString());
+        }
+
+        Long balance = dbRepo.findBalance(accountId, localRoutingNum);
+        if (balance == null) {
+            balance = 0L;
+        }
+        try {
+            commands().setex(key(accountId), randomizedTtl(), balance.toString());
+        } catch (RuntimeException err) {
+            LOGGER.warn("Balance cache write failed: {}", err.toString());
+        }
+        return balance;
+    }
+
+    /** Delete after ledger changes; failure does not roll back a DB commit. */
+    public void invalidate(String accountId) {
+        try {
+            commands().del(key(accountId));
+        } catch (RuntimeException err) {
+            LOGGER.warn("Balance cache invalidation failed: {}", err.toString());
+        }
+    }
+
+    private synchronized RedisAdvancedClusterCommands<String, String> commands() {
+        if (client == null) {
+            throw new IllegalStateException("Valkey cache is not configured");
+        }
+        if (connection == null || !connection.isOpen()) {
+            connection = client.connect();
+        }
+        return connection.sync();
+    }
+
+    private long randomizedTtl() {
+        return ttlSeconds + ThreadLocalRandom.current()
+            .nextLong(jitterSeconds + 1);
+    }
+
+    private String key(String accountId) {
+        return KEY_PREFIX + "{" + accountId + "}";
+    }
+
+    @PreDestroy
+    public void close() {
+        if (connection != null) {
+            connection.close();
+        }
+        if (client != null) {
+            client.shutdown();
+        }
     }
 }
