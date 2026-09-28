@@ -1,0 +1,36 @@
+name: Branch Promotion Policy
+
+on:
+  pull_request:
+    branches: [dev, release, main]
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-policy:
+    name: Branch Promotion Policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate source and target branches
+        shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          case "${BASE_BRANCH}:${HEAD_BRANCH}" in
+            dev:feature/*|release:dev|main:release)
+              echo "Allowed promotion: ${HEAD_BRANCH} -> ${BASE_BRANCH}"
+              ;;
+            *)
+              echo "::error::Invalid branch promotion: ${HEAD_BRANCH} -> ${BASE_BRANCH}"
+              echo "Allowed promotions:"
+              echo "  feature/* -> dev"
+              echo "  dev       -> release"
+              echo "  release   -> main"
+              exit 1
+              ;;
+          esac
