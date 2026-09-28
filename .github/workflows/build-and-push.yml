@@ -26,8 +26,8 @@ env:
   # GitOps
   GITOPS_REPOSITORY: AWS-TEAM1/gitops
   GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'dev' }}
-  EKS_GITOPS_GROUP_DIR: 03_manifests/eks/ledger
-  GKE_GITOPS_GROUP_DIR: 03_manifests/gke/ledger
+  EKS_GITOPS_GROUP_DIR: 03_manifests/overlays/eks/ledger
+  GKE_GITOPS_GROUP_DIR: 03_manifests/overlays/gke/ledger
 
 jobs:
   # ============================================================
