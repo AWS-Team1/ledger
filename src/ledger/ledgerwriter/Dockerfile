@@ -4,7 +4,7 @@ COPY pom.xml .
 COPY src ./src
 RUN mvn -B -DskipTests package
 
-FROM eclipse-temurin:17-jre@sha256:23d7f52652b6b65b57eab85df9631741807929a68ff7e37c27104de6ac6690d5
+FROM eclipse-temurin:17-jre@sha256:e04fa72be13b257a59fdec6dc14af78c8f80f035d3c1ed4e03e45552a231d4c8
 WORKDIR /app
 COPY --from=builder /app/target/*.jar /app/app.jar
 
